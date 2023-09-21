@@ -2,51 +2,45 @@
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
 using System.Text;
 
 namespace SourceGenerator
 {
-    [Generator]
-    public class FactoryGenerator : ISourceGenerator
+    [Generator(LanguageNames.CSharp)]
+    public class FactoryGenerator : IIncrementalGenerator
     {
-        public void Execute(GeneratorExecutionContext context)
+        private Dictionary<string, FunctionMetadata> _registeredClasses = new Dictionary<string, FunctionMetadata>();
+        public void Initialize(IncrementalGeneratorInitializationContext context)
         {
-            // Register the Class that has Function Attribute
-            // If the Attribute says logging enabled, Register the class with LoggingAdapter
-            INamedTypeSymbol attributeSymbol = context.Compilation.GetTypeByMetadataName("AOPLib.FunctionAttribute");
-            var targetClasses = context.Compilation.SyntaxTrees
-                .SelectMany(st => st.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>());
-            foreach(var clazz in targetClasses)
-            {
-                var name = clazz.Identifier.ValueText;
-                var name2 = clazz.AttributeLists.FirstOrDefault()?.Attributes.FirstOrDefault()?.Name.NormalizeWhitespace().ToFullString();
-            }
+            Debugger.Launch();
+            var source = context.SyntaxProvider.ForAttributeWithMetadataName(
+                "AOPLib.FunctionAttribute",
+                (node, token) => true,
+                (ctx, token) => ctx
+                );
+            var source2 = source.Select((s, token) => { 
+                var typeSymbol = (INamedTypeSymbol)s.TargetSymbol;
+                var fullType = typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                var name = typeSymbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+                var isLogging = (bool)(s.Attributes.FirstOrDefault()?.ConstructorArguments.FirstOrDefault().Value ?? false);
+                return new FunctionMetadata { FullyQualifiedName = fullType, Name = name, IsLogging = isLogging };
+            }).Collect();
 
-            var selectedTargetClasses = targetClasses.Where(p => p.AttributeLists.FirstOrDefault()?.Attributes.FirstOrDefault()?.Name.NormalizeWhitespace().ToFullString() == "Function");
+            context.RegisterSourceOutput(source2, Emit);
+        }
 
-            var registeredClasses = new Dictionary<string, FunctionMetadata>();
-            // Next Step 1. Extract the classes with the Attribute is logging. Fully Qualified Name with isLogging property will help.
-            foreach (var clazz in selectedTargetClasses)
-            {
-                var attribute = clazz.AttributeLists.First()?.Attributes.FirstOrDefault();
-                var attributeArgument = attribute.ArgumentList.Arguments.FirstOrDefault();
-                var isLogging = attributeArgument.Expression.NormalizeWhitespace().ToFullString().Contains("true");
-                var typeSymbol = context.Compilation.GetSemanticModel(clazz.SyntaxTree).GetDeclaredSymbol(clazz);
-                var className = typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                var classNameOnly = typeSymbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
-                registeredClasses.Add(classNameOnly, new FunctionMetadata { FullyQualifiedName = className, Name = classNameOnly, IsLogging = isLogging });
-            }
-
-
+        private void Emit(SourceProductionContext context, ImmutableArray<FunctionMetadata> source)
+        {
             // Create Factory
             context.AddSource("FunctionFactory.g.cs", SourceText.From($@"
 namespace AOPLib{{
   public class FunctionFactory {{
     public static IFunction CreateFunction(string name) {{
           switch(name) {{
-            {GetFunctionsSection(registeredClasses)}
+            {GetFunctionsSection(source)}
             default:
               return new SampleFunction();
           }}
@@ -56,24 +50,19 @@ namespace AOPLib{{
 ", Encoding.UTF8));
         }
 
-        public void Initialize(GeneratorInitializationContext context)
-        {
-            Debugger.Launch();
-        }
-
-        private string GetFunctionsSection(Dictionary<string, FunctionMetadata> metadata)
+        private string GetFunctionsSection(ImmutableArray<FunctionMetadata> metadata)
         {
             var sb = new StringBuilder();
             foreach (var item in metadata)
             {
-                sb.AppendLine($"case \"{item.Key}\":");
-                if (item.Value.IsLogging)
+                sb.AppendLine($"case \"{item.Name}\":");
+                if (item.IsLogging)
                 {
-                    sb.AppendLine($"return new LoggingAdapter(new {item.Value.FullyQualifiedName}());");
+                    sb.AppendLine($"return new LoggingAdapter(new {item.FullyQualifiedName}());");
                 }
                 else
                 {
-                    sb.AppendLine($"return new {item.Value.FullyQualifiedName}();");
+                    sb.AppendLine($"return new {item.FullyQualifiedName}();");
                 }
             }
             return sb.ToString();
